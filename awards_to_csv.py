@@ -1,63 +1,119 @@
 #!/usr/bin/env python3
+"""
+sam_award_scraper.py  –  turnkey Award-Notice lead list
+"""
+
 import csv, time, requests, datetime as dt
-from typing import List, Dict
+from typing import Dict, List, Optional
 
-NAICS = "236220 237310 238210"   # keywords
-DAYS  = 30
-SIZE  = 100
+# ───────── CONFIG ──────────────────────────────────────────────────────────
+NAICS_SEARCH = "236220 237310 238210"          # search keywords
+DAYS_BACK    = 30
+PAGE_SIZE    = 100
+PAUSE_LIST   = 0.35                            # seconds between list pages
+PAUSE_DETAIL = 0.20                            # seconds between detail calls
+# ───────────────────────────────────────────────────────────────────────────
 
-LIST_URL = "https://sam.gov/api/prod/sgs/v1/search/"
-HEADERS  = {"User-Agent": "Mozilla/5.0"}
+LIST_URL   = "https://sam.gov/api/prod/sgs/v1/search/"
+DETAIL_URL = "https://sam.gov/api/prod/opps/v2/opportunities/{}"
+HEADERS    = {"User-Agent": "Mozilla/5.0"}
 
-today  = dt.date.today()
-since  = today - dt.timedelta(days=DAYS)
+today = dt.date.today()
+since = today - dt.timedelta(days=DAYS_BACK)
 
-PARAMS = {
-    "index": "opp",
-    "size": SIZE,
-    "sort": "-modifiedDate",
-    "mode": "search",
-    "responseType": "json",
-    "q": NAICS,
-    "qMode": "ANY",
-    "is_active": "true",
-    "notice_type": "a",
-    "dateFilter": "modifiedDate",
-    "modified_date.from": since.strftime("%Y-%m-%d-04:00"),
-    "modified_date.to"  : today.strftime("%Y-%m-%d-04:00")
+BASE_PARAMS = {
+    "index"              : "opp",
+    "size"               : PAGE_SIZE,
+    "sort"               : "-modifiedDate",
+    "mode"               : "search",
+    "responseType"       : "json",
+    "notice_type"        : "a",                 # Award Notice
+    "q"                  : NAICS_SEARCH,
+    "qMode"              : "ANY",
+    "is_active"          : "true",
+    "dateFilter"         : "modifiedDate",
+    "modified_date.from" : since.strftime("%Y-%m-%d-04:00"),
+    "modified_date.to"   : today.strftime("%Y-%m-%d-04:00"),
 }
 
+# ───────── helpers ─────────────────────────────────────────────────────────
 def list_page(page: int) -> List[Dict]:
-    r = requests.get(LIST_URL, params=PARAMS | {"page": page},
+    r = requests.get(LIST_URL, params=BASE_PARAMS | {"page": page},
                      headers=HEADERS, timeout=20)
     r.raise_for_status()
     return r.json()["_embedded"]["results"]
 
-rows, pg = [], 0
+def fetch_detail(opp_id: str) -> Optional[Dict]:
+    r = requests.get(DETAIL_URL.format(opp_id), headers=HEADERS, timeout=20)
+    if r.status_code != 200:
+        return None
+    j = r.json()
+    return j.get("data2") or j.get("data") or j
+
+def get_naics(payload: Dict) -> str:
+    if payload.get("naics"):
+        return ", ".join(
+            code
+            for blk in payload["naics"]
+            for code in blk.get("code", [])
+        )
+    if payload.get("classificationCodes"):
+        return payload["classificationCodes"][0].get("code", "")
+    if payload.get("naicsCode"):
+        return payload["naicsCode"]
+    return ""
+
+def get_id(payload: Dict) -> str:
+    return (
+        payload.get("opportunityId")
+        or payload.get("id")
+        or payload.get("_id")
+        or payload.get("_links", {}).get("self", {}).get("href", "").split("/")[-1]
+    )
+
+# ───────── 1) pull all summaries ───────────────────────────────────────────
+summaries, page = [], 0
 while True:
-    batch = list_page(pg)
+    batch = list_page(page)
     if not batch:
         break
-    rows.extend(batch)
-    if len(batch) < SIZE:
+    summaries.extend(batch)
+    if len(batch) < PAGE_SIZE:
         break
-    pg += 1
-    time.sleep(0.3)
+    page += 1
+    time.sleep(PAUSE_LIST)
 
-print("Rows pulled:", len(rows))
+print("Summary rows:", len(summaries))
 
+# ───────── 2) enrich with detail ───────────────────────────────────────────
+rows = []
+for s in summaries:
+    base = {
+        "title"  : s.get("title", ""),
+        "company": s.get("award", {}).get("awardee", {}).get("name", ""),
+        "amount" : s.get("award", {}).get("amount", ""),
+        "naics"  : get_naics(s),
+        "id"     : get_id(s),
+    }
+
+    # if amount or naics missing ⇒ call detail
+    if not base["amount"] or not base["naics"]:
+        d = fetch_detail(base["id"])
+        if d:
+            base["company"] = base["company"] or d.get("award", {}).get("awardee", {}).get("name", "")
+            base["amount"]  = base["amount"]  or d.get("award", {}).get("amount", "")
+            base["naics"]   = base["naics"]   or get_naics(d)
+    rows.append(base)
+    time.sleep(PAUSE_DETAIL)
+
+print("Detail calls :", len([r for r in rows if not r['amount'] or not r['naics']]))
+
+# ───────── 3) write CSV ────────────────────────────────────────────────────
 with open("award_notices.csv", "w", newline="") as f:
     w = csv.writer(f)
     w.writerow(["title", "company", "amount", "naics", "url"])
     for r in rows:
-        title   = r.get("title")
-        company = r.get("award", {}).get("awardee", {}).get("name")
-        amount  = r.get("award", {}).get("amount")
-        naics   = r.get("type", {}).get("value") or ""   # fallback
-        row_naics = r.get("typeOfSetAsideDescription") \
-                     or r.get("naics", [{}])[0].get("code")
-        nid     = r.get("_id")              # record id used by UI
-        url     = f"https://sam.gov/opp/{nid}/view" if nid else ""
-        w.writerow([title, company, amount, row_naics, url])
+        url = f"https://sam.gov/opp/{r['id']}/view" if r["id"] else ""
+        w.writerow([r["title"], r["company"], r["amount"], r["naics"], url])
 
-print("✅  award_notices.csv ready – open it for your outreach list")
+print("✅  award_notices.csv ready — open it for enrichment & outreach")
