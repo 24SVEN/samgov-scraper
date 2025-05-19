@@ -3,7 +3,7 @@
 sam_award_scraper.py  –  turnkey Award-Notice lead list
 """
 
-import csv, time, requests, datetime as dt
+import csv, time, requests, datetime as dt, os
 from typing import Dict, List, Optional
 
 # ───────── CONFIG ──────────────────────────────────────────────────────────
@@ -109,11 +109,22 @@ for s in summaries:
 print("Detail calls :", len([r for r in rows if not r['amount'] or not r['naics']]))
 
 # ───────── 3) write CSV ────────────────────────────────────────────────────
-with open("award_notices.csv", "w", newline="") as f:
+# Get the absolute path to the project root directory
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(script_dir)
+csv_exports_dir = os.path.join(project_root, "csv_exports")
+
+# Create csv_exports directory if it doesn't exist
+os.makedirs(csv_exports_dir, exist_ok=True)
+
+# Use absolute path for CSV file
+csv_path = os.path.join(csv_exports_dir, "award_notices.csv")
+
+with open(csv_path, "w", newline="") as f:
     w = csv.writer(f)
     w.writerow(["title", "company", "amount", "naics", "url"])
     for r in rows:
         url = f"https://sam.gov/opp/{r['id']}/view" if r["id"] else ""
         w.writerow([r["title"], r["company"], r["amount"], r["naics"], url])
 
-print("✅  award_notices.csv ready — open it for enrichment & outreach")
+print(f"✅  {csv_path} ready — open it for enrichment & outreach")

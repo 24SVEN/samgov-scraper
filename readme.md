@@ -16,4 +16,4 @@
 ## To run
 1) source venv/bin/activate
 2) pip3 install requests
-3) python3 awards_to_csv.py
+3) python3 scripts/awards_to_csv.py
